@@ -1,0 +1,186 @@
+@ PROGRAM TO INTERFACE RC SYSTEMS 8660 SPEECH SYNTHESIS BOARD
+
+@ WITH BEAGLEBONE BLACK USING RS-232C COM 2 PORT ON AN INTERRPT BASIS
+
+@ DRAFT STARTED BY KELLY MAKINSTER, 2019                                                                                                               
+                                                                                                                                                       
+.text                                                                                                                                                  
+.global _start  
+.global INT_DIRECTOR                                                                                                                                       
+_start:   
+		@ Initialize Stack
+        LDR R13,=STACK1				@ Point to base of stack for SVC mode
+        ADD R13, R13, #0x1000		@ Point to the top of the stack   
+        CPS #0x12					@ Switch to IRQ mode  
+       	LDR R13,=STACK2				@ Point to base of stack for IRQ mode
+       	ADD R13, R13, #0x1000		@ Point to the top of the stack   
+       	CPS #0x13					@ Switch to SVC mode       			                                                                                                                                                                                                                                           
+	
+		@Initialize INTC 
+		LDR R1,=0x48200000			@ Base address of INTC
+		
+		@Initialize UART INTC
+		LDR R2, [R1,#0xA8]			@ load INTC_MIR_CLEAR1 register
+		ORR	R2, R2, #0x00004000		@ Value to unmask INTC INT 46, UART5 interrupt
+		STR R2, [R1, #0xA8]			@ Write to INTC_MIR_CLEAR1 register
+		
+		@LDR R2, [R1,#0xA8]
+		@ORR	R2, R2, #0x00000001	
+		@MOV R2, #0x4000				@ Value to unmask INTC INT 46, UART5 interrupt
+		@STR R2, [R1, #0xA8]			@ Write to INTC_MIR_CLEAR1 register
+
+		
+		@Program UART5 pins
+		LDR R1,=0x44E10000			@ Base address for Control Module
+		MOV R2, #0x6				@ Word for mode 6
+		STR R2, [R1, #0x8D8]		@ Write to lcd data 14 - CTS
+		STR R2, [R1, #0x8DC]		@ Write to lcd data 15 - RTS
+		MOV R2, #0xC				@ Word for mode 4 and input enabled
+		STR R2, [R1, #0x8C0]		@ Write to lcd data 8 - TxD
+		STR R2, [R1, #0x8C4]		@ Write to lcd data 9 - RxD
+		@lcd pin 14	- 0x44E108D8	mode 6: 0x101110
+		@lcd pin 15	- 0x44E108DC	mode 6: 0x101110
+		@lcd pin 8	- 0x44E108C0	mode 4: 0x101100
+		@lcd pin 9	- 0x44E108C4	mode 4: 0x101100
+	
+	
+		@Turn on UART5 clock
+		LDR R1,=0x44E00038			@ Base address for Control Module	
+		MOV R2,#0x02				@ Value to reset clock
+		STR R2, [R1]				@ write to UART5_CLKCTRL
+		
+		@Initialize UART5
+		
+		@switch to configuration mode A
+		LDR R1,=0x481AA000			@ Base address for UART5
+		MOV R2,#0x83				@ Word to switch to configuration mode A
+		STR R2, [R1, #0x0C]			@ Write to LCR
+
+		@Set Baud Rate
+		MOV R2,#0x4E				@ Value to set DLL clock
+		STR R2, [R1]				@ Write to DLL
+		MOV R2,#0x00				@ Value to set DLH clock
+		STR R2, [R1, #0x04]			@ Write to DLH
+		@set DLH - DLL dividor to 16
+		STR R2, [R1, #0x20]			@ Write 0 to to MDR1 to reset
+
+		@Switch back to configuration mode
+		MOV R2,#0x03				@ Word to switch to operational mode (LCR[7] = 0)
+		STR R2, [R1, #0x0C]			@ Write to LCR
+
+		@enable UART interrupts
+		MOV R2,#0xA					@ Word to enable interupts 1010
+		STR R2, [R1, #0x04]			@ Write to IER_UART
+		@Disable RX_FIFO, TX_FIFO & FIFO_EN
+		MOV R2,#0x3					@ Word to disable RX_FIFO, TX_FIFO & FIFO_EN
+		@MOV R2,#0x00
+		STR R2, [R1, #0x8]			@ Write to FCR
+		
+		@Make sure processor IRQ enabled in CPSR
+		MRS R3, CPSR				@ Copy CPSR to R3
+		BIC R3, #0x80				@ Clear bit 7
+		MSR CPSR_c, R3				@ Write back to CPSR
+		
+
+LOOP:	NOP
+		B LOOP						@ Go back to light procedure
+			
+INT_DIRECTOR:
+		STMFD SP!, {R0-R5, LR}		@ Push Registers onto stack
+		
+		@see if interupt came from UART
+		LDR R0,=0x482000B8			@ Load address of INTC-PENDING_IRQ1 register
+		LDR R1, [R0]				@ Read INTC-PENDING_IRQ3 register
+		TST R1, #0x4000				@ Test Bit 15
+		BEQ GOBCK					@ Unrelated interrupt
+		LDR R0,=0x481AA008			@ Load address of INTC-PENDING_IRQ1 register
+		LDR R1, [R0]				@ Read INTC-PENDING_IRQ3 register
+		TST R1, #0x2				@ to see if IIT bit is set
+		BNE TALKER_SVC				@ talker interrupt occured
+		
+GOBCK:	
+		LDMFD SP!, {R0-R5, LR}		@ Restore registers
+		SUBS PC, LR, #4				@ Pass execution on to wait loop
+			
+TALKER_SVC:
+		LDR R1,=0x481AA018			@ Base address for UART5 modem status
+		LDRB R3, [R1]
+		TST R3, #0x10				@ Test Bit 4 - CTS
+		BEQ PASS_ON_TALKER
+		LDR R1,=0x481AA014			@ Base address for UART5 modem status
+		LDRB R3, [R1]
+		TST R3, #0x20				@ Test Bit 5 - THR
+		BNE SEND					@ Go to send procedure
+		B GOBCK						@ THR not set
+									@ else
+	
+SEND:								@ else
+		LDR R4,=0x481AA004			@ Base address for IER_UART5
+		MOV R5,#0x0A				@ Word to reset interupts 1010
+		STRB R5, [R4]				@ Write to IER_UART
+		
+		@LDR	R0, =CHAR_PTR
+		LDR	R0, =CHAR_PTR			@ SEND CHARACTER, R0 = ADDRESS OF POINTER STORE
+		LDR	R1, [R0]				@ R1 = ADDRESS OF DESIRED CHARACTER IN TEXT STRING
+		@LDR	R2, =CHAR_COUNT
+		LDR	R2, =CHAR_COUNT			@ R2 = ADDRESS OF COUNT STORE LOCATION
+		LDR	R3, [R2]				@ GET CURRENT CHARACTER COUNT VALUE
+		LDRB	R4, [R1], #1		@ READ CHAR TO send from string and increment pointer
+		STR	R1, [R0]				@ PUT INCREMENTED ADDRESS BACK IN CHAR_PTR LOCATION
+		
+		LDR	R5, =0x481AA000			@ POINT AT UART TRANSMIT BUFFER
+		STRB	R4, [R5]			@ WRITE CHARACTER TO TRANSMIT BUFFER
+		SUBS	R3, R3, #1			@ DECREMENT CHARACTER COUNTER BY 1	
+		STR	R3, [R2]				@ STORE CHARACTER VALUE COUNTER BACK IN MEMORY
+		CMP R3, #0x00				@ check char counter value
+		BNE	GOBCK					@ still characters remaining
+		
+		LDR	R3, =MESSAGE
+		LDR	R3, =MESSAGE			@ DONE, RELOAD. GET ADDRESS OF START OF STRING
+		STR R3, [R0]				@ WRITE IN CHAR POINTER STORE LOCATION IN MEMORY
+		MOV R3, #MESSAGE_LEN		@ LOAD ORIGINAL NUMBER OF CHAR IN STRING AGAIN
+		STR R3, [R2]				@ WRITE BACK TO MEMORY FOR NEXT MESSAGE SEND
+		
+		LDR R0, =0x481AA004			@ LOAD ADDRESS OF MODEM CONTROL REGISTER (MCR)
+		LDRB R1, [R0]				@ READ CURRENT VALUE OF REGISTER
+		BIC R1, R1, #0x08			@ CLEAR BIT 3 TO DISABLE UART INTERRUPTS
+		STRB R1, [R0]				@ WRITE BYTE BACK TO ICMR REGISTER
+		B GOBCK
+		
+PASS_ON_TALKER:
+		LDR R1,=0x481AA014			@ Base address for LSR_UART
+		LDRB R2, [R0]				@ Read (won't reset)
+		TST R2, #0x20				@ Test Bit 5 - THR
+		BEQ GOBCK					@ Exit - CTS and THR are not asserted
+		LDR R1,=0x481AA004			@ Base address for UART5
+		MOV R2,#0x08				@ Word to enable interupts 1010
+		STRB R2, [R1]				@ Write to IER_UART
+		B GOBCK
+
+
+		
+@SYS_IRQ:	.WORD 0
+
+.data
+
+.align 4
+
+MESSAGE: .byte 0x0D
+.ascii "Take me to your leader"
+.byte 0x0D
+
+.align 2
+CHAR_PTR: .word MESSAGE	@ POINTER TO NEXT CHARACTER TO SEND
+CHAR_COUNT: .word 24	@ COUNTER FOR NUMBER OF CHARACTERS TO SEND
+@ NUMBER OF CHARACTERS COUNTS X-1 DOWN TO 0
+.align 4
+.EQU MESSAGE_LEN, 24
+.align 4
+	
+STACK1:		.rept 1024
+			.word 0x0000
+			.endr           
+STACK2:		.rept 1024
+			.word 0x0000
+			.endr                                                                                                                                                                                                                                                                          
+.end                                                                                                                                                  
