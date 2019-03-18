@@ -1,19 +1,4 @@
-Skip to content
- 
-Search or jump to…
-
-Pull requests
-Issues
-Marketplace
-Explore
- @makinster Sign out
-1
-0 0 danjperron/blueGyro.X
- Code  Issues 0  Pull requests 0  Projects 0  Wiki  Insights
-blueGyro.X/i2cMaster.c
-@danjperron danjperron add magnetometer
-dc439a1  on Oct 12, 2016
-Executable File  178 lines (145 sloc)  5.06 KB
+http://www.hobbytronics.co.uk/hi-tech-c-i2c-master
     
 #include <htc.h>
 #include <stddef.h>
