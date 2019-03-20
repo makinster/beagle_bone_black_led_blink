@@ -1,0 +1,259 @@
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+
+//defines Section
+#define HWREG(x) (*((volatile unsigned int *)(x)))  //macro
+
+//GPIO defines
+#define GPIO1BA 0x4804C000
+#define GPIO_SET_DATA_OUT 0x194
+#define GPIO_CLEAR_DATA_OUT 0x190
+
+//I2C defines
+#define I2C1_WKUP 0x44E00048
+#define I2C1_P17 0x44E10958         // use Pin 17 on P9  for SCL
+#define I2C1_P18 0x44E1095C         // use Pin 18 on P9  for SDA
+#define I2C1_BASE 0x4802A000        // base address for I2C initialization
+
+#define I2C_CON 0x4802A0A4          // I2C_CON Address
+#define I2C_CLK_P 0x4802A0B0        // I2C Clock Prescaler Register
+
+#define SYS_CONFIG 0x4802A000       // LCD system configuration register
+
+//INTC defines
+#define INTCBA 0x48200000
+
+//Timer 5 defines
+#define TIMER5_BA 0x48046000
+
+//other defines
+#define CLKWKUPS 0x44E00000
+#define LIGHT_BITS 0x01E00000
+
+//Function Declarations
+void IntMasterIRQEnable();
+void int_handler();
+void turn_off_leds();
+void turn_on_leds();
+void timer5_int();
+void poll_loop();
+void return_from_int();
+
+void Turn_Off_ardy();
+void Turn_Off_xrdy();
+void Wait_ardy();
+void Wait_xrdy();
+void Transmit_Data(int data);
+void delay(int count);
+void poll_loop(void);
+
+//global variables
+int current_state = 1;
+int x;
+char my_name[7] = "Kelly M";
+char my_name2[7] = "       ";
+char my_name3[7] = "Is Cool";
+volatile unsigned int USR_STACK[100];
+volatile unsigned int INT_STACK[100];
+
+int main(void)
+{
+	//SET UP STACKS
+	//init USR stack
+	asm("LDR R13, =USR_STACK");
+	asm("ADD R13, R13, #0x100");
+	//init IRQ stack
+	asm("CPS #0x12");
+	asm("LDR R13, =INT_STACK");
+	asm("ADD R13, R13, #0x100");
+	asm("CPS #0x13");
+
+	//I2C1 Initialization ==============================================
+
+	HWREG(I2C1_WKUP) =0x2; 	//enable clock for I2C1
+
+	//I2C1 Control Module
+	//0x72 for Slow slew rate/ Pull Up/ Receiver enable/ Mode 2
+	HWREG(I2C1_P17) =0x72;			//use Pin 17 on P9  for SCL
+	HWREG(I2C1_P18) =0x72;			//use Pin 18 on P9  for SDA
+
+	HWREG(I2C1_BASE + 0xA4) =0x0; 	//Disable I2C_EN by Storing 0 at I2C_CON (offset 0xA4)
+	HWREG(I2C1_BASE + 0x10) =0x0;	//Disable auto idle by Storing 0 at I2C config register (offset 0x10)
+
+	//set PSC 3 for divide/4
+	//0x3 for divide by 4
+	HWREG(I2C1_BASE + 0xB0) =0x3;	//store 0x3 at I2C Clock Prescaler Register
+
+	//set SCKK and SCLH with 0x36
+	HWREG(I2C1_BASE + 0xB4) =0x36; 	//store 0x36 to I2C_SCLL Register
+	HWREG(I2C1_BASE + 0xB8) =0x36;		//store 0x36 to I2C_SCLH Register
+
+	HWREG(I2C1_BASE + 0xA8) =0x1;
+
+
+	HWREG(I2C1_BASE + 0x94) =0x0;
+	HWREG(I2C1_BASE + 0xA4) =0x8000;	//enable I2C_EN  by storing 0x8000 to I2C config register
+
+	//LCD Initialization =================================================
+	HWREG(SYS_CONFIG + 0x28) =0xFFFF;	//clear all bits of IRQSTATUS register by writing 0xFFFF
+
+	//Set Slave address 0x3C with 10 data byte counter
+	HWREG(SYS_CONFIG + 0xAC) =0x3C;		//Store address of slave to I2C Slave Address Register
+	HWREG(SYS_CONFIG + 0x98) =10;		//Set Load Data Counter Register I2C CNT for 10 byte counter
+										//0x8603 - word forEnable/Master/Transmit/STT/STP
+	HWREG(SYS_CONFIG + 0xA4) =0x8603;	//store 0x8603 to LOAD I2C_CON Address
+
+	//send first data packet
+	Transmit_Data(0x0);
+	Transmit_Data(0x38);
+	Transmit_Data(0x39);
+	delay(10);							//10ms delay
+	Transmit_Data(0x14);
+	Transmit_Data(0x78);
+	Transmit_Data(0x5E);
+	Transmit_Data(0x6D);
+	Transmit_Data(0x0C);
+	Transmit_Data(0x01);
+	Transmit_Data(0x06);
+
+	Turn_Off_ardy();
+	delay(50);						//10ms delay
+
+	HWREG(SYS_CONFIG + 0x28) =0xFFFF;	//clear all bits of IRQSTATUS register by writing 0xFFFF
+	HWREG(SYS_CONFIG + 0xAC) =0x3C;		//Store address of slave to I2C Slave Address Register
+	HWREG(SYS_CONFIG + 0x98) =20;		//counter
+	HWREG(SYS_CONFIG + 0xA4) =0x8603;	//send word for Enable/Master/Transmit/STT/STP to LOAD I2C_CON Address
+
+	Transmit_Data(0x80);
+	Transmit_Data(0x86);
+	Transmit_Data(0x40);
+	//delay(10);							//10ms delay
+
+	int i=0;
+	while (i<sizeof(my_name))
+	{
+		Transmit_Data(my_name[i]);
+		delay(4);
+		i=i+1;
+	}
+
+
+	/*
+	Transmit_Data('-');
+	Transmit_Data('-');
+	Transmit_Data('k');
+	Transmit_Data('e');
+	Transmit_Data('l');
+	Transmit_Data('l');
+	Transmit_Data('y');
+	//Transmit_Data(' ');
+	delay(1000);
+	Transmit_Data(' ');
+	Transmit_Data('M');
+	Transmit_Data('a');
+	Transmit_Data('k');
+	Transmit_Data('i');
+	Transmit_Data('n');
+	Transmit_Data('s');
+	Transmit_Data('t');
+	Transmit_Data('e');
+	Transmit_Data('r');
+	//Transmit_Data('M');
+	//delay(10);
+	//Transmit_Data('A');
+	//delay(10);
+	//Transmit_Data('K');
+	//delay(10);
+	//Transmit_Data('I');
+	//delay(10);
+	//Transmit_Data('N');
+	//delay(10);
+	//Transmit_Data('S');
+	//delay(10);
+	//Transmit_Data('T');
+	//delay(10);
+	//Transmit_Data('E');
+	//delay(10);
+	//Transmit_Data('R');
+	//delay(10);
+*/
+
+	while (1)
+	{
+
+	}
+
+	return;
+}
+
+
+void poll_loop(void)
+{
+	while(1)
+	{
+		//do nothing loop
+	}
+}
+
+
+//Used to delay during polling
+void delay(int count)
+{
+  int j=0,i=0;
+
+  for(j=0;j<count;j++)
+  {
+    for(i=0;i<60;i++)
+    {
+        //do nothing
+    }
+  }
+}
+
+//Transmit 1 byte of data to I2C LCD
+void Transmit_Data(int data)
+{
+    //Load I2C Data Register
+    HWREG(I2C1_BASE+0x9C) = data;   //load data into I2C Data Register
+    Wait_xrdy();
+    Turn_Off_xrdy();
+}
+
+//Wait until the I2C registers are ready for access
+void Wait_xrdy()
+{
+    //read IRQ_STATUS RAW
+    x = HWREG(I2C1_BASE+0x24);
+    while (!(x << 4))           //check bit 4
+    {
+        //do nothing
+    }
+}
+
+//Wait until the I2C registers are ready for access
+void Wait_ardy()
+{
+    //read IRQ_STATUS RAW
+    x = HWREG(I2C1_BASE+0x24);
+    while (!(x << 2) )          //check bit 2
+    {
+        //do nothing
+    }
+}
+
+void Turn_Off_xrdy()
+{
+    //Read IRQSTATUS Register
+    HWREG(I2C1_BASE+0x28) =0x10;      //write 1 to xrdy bit to clear
+}
+
+void Turn_Off_ardy()
+{
+    //Read IRQSTATUS Register
+    HWREG(I2C1_BASE+0x28) =0x4;      //write 1 to ardy bit to clear
+}
+
+
